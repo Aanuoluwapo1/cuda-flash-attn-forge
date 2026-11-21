@@ -1,0 +1,40 @@
+name: C++17 & CUDA Fallback CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  cpu-fallback-build-and-test:
+    name: Build & Verify Parity (CPU Fallback)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake (BUILD_CUDA_KERNELS=OFF)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_CUDA_KERNELS=OFF
+
+      - name: Build targets
+        run: cmake --build build --config Release
+
+      - name: Run CTest parity suite
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Run CLI benchmark & parity report
+        run: |
+          if [ -f "./build/attn_forge" ]; then
+            ./build/attn_forge --mode all --m 128 --n 128 --k 128 --seq-len 64 --head-dim 32 --iters 5
+          elif [ -f "./build/Release/attn_forge.exe" ]; then
+            ./build/Release/attn_forge.exe --mode all --m 128 --n 128 --k 128 --seq-len 64 --head-dim 32 --iters 5
+          else
+            ./build/attn_forge.exe --mode all --m 128 --n 128 --k 128 --seq-len 64 --head-dim 32 --iters 5
+          fi
+        shell: bash
