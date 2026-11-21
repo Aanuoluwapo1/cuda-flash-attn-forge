@@ -324,3 +324,12 @@ l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 sm__warps_active.avg.pct_of_peak_sustained_active \
 ./build/attn_forge --mode all --iters 1
 ```
+
+---
+
+## 8. Known Limitations
+
+- **Occupancy figures are an analytical model** of Turing SM 7.5 (32 warps, 16 blocks, 64 KB shared memory per SM); they are not measured. Verify with Nsight Compute (`sm__warps_active`) on real hardware.
+- **Attention kernel is FlashAttention-*style*, not production FlashAttention:** one query row per thread, per-thread `q_reg`/`o_acc` arrays (likely local-memory spills), 16-thread blocks, no Tensor Cores. Expect it to be far from cuBLAS/FlashAttention-2 throughput.
+- **GPU-vs-CPU speedups** compare against an unvectorised single-thread CPU emulation, not an optimised BLAS.
+- The `nvcc` build path is compiled-in but untested on this workstation (no CUDA Toolkit installed); the Clang NVPTX + Driver API path is what was run on the GTX 1660 SUPER. The PTX is generated for `sm_75` only.

@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -204,6 +205,22 @@ void check_cu(CudaDriverApi& api, CUresult err, const char* call_str, const char
     }
 }
 
+// RAII guard: frees device buffers and events even if a CU_DRV_CHECK throws.
+struct DeviceScope {
+    CudaDriverApi& api;
+    std::vector<CUdeviceptr> ptrs;
+    std::vector<CUevent> events;
+    explicit DeviceScope(CudaDriverApi& a) : api(a) {}
+    DeviceScope(const DeviceScope&) = delete;
+    DeviceScope& operator=(const DeviceScope&) = delete;
+    void track(CUdeviceptr p) { ptrs.push_back(p); }
+    void track_event(CUevent e) { events.push_back(e); }
+    ~DeviceScope() {
+        for (CUevent e : events) { if (e) api.cuEventDestroy(e); }
+        for (CUdeviceptr p : ptrs) { if (p) api.cuMemFree(p); }
+    }
+};
+
 #define CU_DRV_CHECK(api, call) check_cu((api), (call), #call, __FILE__, __LINE__)
 
 } // namespace
@@ -228,15 +245,16 @@ double launch_gemm_tiled_cuda(
 ) {
     auto& api = get_driver();
     CU_DRV_CHECK(api, api.cuCtxSetCurrent(api.context));
+    DeviceScope scope(api);
 
     const std::size_t bytes_A = static_cast<std::size_t>(cfg.m) * cfg.k * sizeof(float);
     const std::size_t bytes_B = static_cast<std::size_t>(cfg.k) * cfg.n * sizeof(float);
     const std::size_t bytes_C = static_cast<std::size_t>(cfg.m) * cfg.n * sizeof(float);
 
     CUdeviceptr d_A = 0, d_B = 0, d_C = 0;
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_A, bytes_A));
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_B, bytes_B));
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_C, bytes_C));
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_A, bytes_A)); scope.track(d_A);
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_B, bytes_B)); scope.track(d_B);
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_C, bytes_C)); scope.track(d_C);
 
     CU_DRV_CHECK(api, api.cuMemcpyHtoD(d_A, h_A, bytes_A));
     CU_DRV_CHECK(api, api.cuMemcpyHtoD(d_B, h_B, bytes_B));
@@ -260,8 +278,8 @@ double launch_gemm_tiled_cuda(
     }
 
     CUevent start = nullptr, stop = nullptr;
-    CU_DRV_CHECK(api, api.cuEventCreate(&start, 0));
-    CU_DRV_CHECK(api, api.cuEventCreate(&stop, 0));
+    CU_DRV_CHECK(api, api.cuEventCreate(&start, 0)); scope.track_event(start);
+    CU_DRV_CHECK(api, api.cuEventCreate(&stop, 0)); scope.track_event(stop);
 
     const int iters = (cfg.iters > 0) ? cfg.iters : 1;
     double elapsed_ms = 0.0;
@@ -293,11 +311,6 @@ double launch_gemm_tiled_cuda(
 
     CU_DRV_CHECK(api, api.cuMemcpyDtoH(h_C, d_C, bytes_C));
 
-    CU_DRV_CHECK(api, api.cuEventDestroy(start));
-    CU_DRV_CHECK(api, api.cuEventDestroy(stop));
-    CU_DRV_CHECK(api, api.cuMemFree(d_A));
-    CU_DRV_CHECK(api, api.cuMemFree(d_B));
-    CU_DRV_CHECK(api, api.cuMemFree(d_C));
 
     return elapsed_ms;
 }
@@ -311,11 +324,12 @@ double launch_warp_rowmax_sum_cuda(
 ) {
     auto& api = get_driver();
     CU_DRV_CHECK(api, api.cuCtxSetCurrent(api.context));
+    DeviceScope scope(api);
 
     const std::size_t bytes = static_cast<std::size_t>(rows) * cols * sizeof(float);
     CUdeviceptr d_in = 0, d_out = 0;
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_in, bytes));
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_out, bytes));
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_in, bytes)); scope.track(d_in);
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_out, bytes)); scope.track(d_out);
     CU_DRV_CHECK(api, api.cuMemcpyHtoD(d_in, h_input, bytes));
 
     constexpr int WARPS_PER_BLOCK = 4;
@@ -331,8 +345,8 @@ double launch_warp_rowmax_sum_cuda(
     CU_DRV_CHECK(api, api.cuCtxSynchronize());
 
     CUevent start = nullptr, stop = nullptr;
-    CU_DRV_CHECK(api, api.cuEventCreate(&start, 0));
-    CU_DRV_CHECK(api, api.cuEventCreate(&stop, 0));
+    CU_DRV_CHECK(api, api.cuEventCreate(&start, 0)); scope.track_event(start);
+    CU_DRV_CHECK(api, api.cuEventCreate(&stop, 0)); scope.track_event(stop);
 
     const int run_iters = (iters > 0) ? iters : 1;
     CU_DRV_CHECK(api, api.cuEventRecord(start, nullptr));
@@ -348,10 +362,6 @@ double launch_warp_rowmax_sum_cuda(
 
     CU_DRV_CHECK(api, api.cuMemcpyDtoH(h_output, d_out, bytes));
 
-    CU_DRV_CHECK(api, api.cuEventDestroy(start));
-    CU_DRV_CHECK(api, api.cuEventDestroy(stop));
-    CU_DRV_CHECK(api, api.cuMemFree(d_in));
-    CU_DRV_CHECK(api, api.cuMemFree(d_out));
 
     return static_cast<double>(total_ms) / run_iters;
 }
@@ -369,16 +379,17 @@ double launch_causal_attention_tiled_cuda(
 
     auto& api = get_driver();
     CU_DRV_CHECK(api, api.cuCtxSetCurrent(api.context));
+    DeviceScope scope(api);
 
     const int total_heads = cfg.batch_size * cfg.num_heads;
     const std::size_t count = static_cast<std::size_t>(total_heads) * cfg.seq_len * cfg.head_dim;
     const std::size_t bytes = count * sizeof(float);
 
     CUdeviceptr d_Q = 0, d_K = 0, d_V = 0, d_Out = 0;
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_Q, bytes));
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_K, bytes));
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_V, bytes));
-    CU_DRV_CHECK(api, api.cuMemAlloc(&d_Out, bytes));
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_Q, bytes)); scope.track(d_Q);
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_K, bytes)); scope.track(d_K);
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_V, bytes)); scope.track(d_V);
+    CU_DRV_CHECK(api, api.cuMemAlloc(&d_Out, bytes)); scope.track(d_Out);
 
     CU_DRV_CHECK(api, api.cuMemcpyHtoD(d_Q, h_Q, bytes));
     CU_DRV_CHECK(api, api.cuMemcpyHtoD(d_K, h_K, bytes));
@@ -400,8 +411,8 @@ double launch_causal_attention_tiled_cuda(
     CU_DRV_CHECK(api, api.cuCtxSynchronize());
 
     CUevent start = nullptr, stop = nullptr;
-    CU_DRV_CHECK(api, api.cuEventCreate(&start, 0));
-    CU_DRV_CHECK(api, api.cuEventCreate(&stop, 0));
+    CU_DRV_CHECK(api, api.cuEventCreate(&start, 0)); scope.track_event(start);
+    CU_DRV_CHECK(api, api.cuEventCreate(&stop, 0)); scope.track_event(stop);
 
     const int iters = (cfg.iters > 0) ? cfg.iters : 1;
     CU_DRV_CHECK(api, api.cuEventRecord(start, nullptr));
@@ -417,12 +428,6 @@ double launch_causal_attention_tiled_cuda(
 
     CU_DRV_CHECK(api, api.cuMemcpyDtoH(h_Out, d_Out, bytes));
 
-    CU_DRV_CHECK(api, api.cuEventDestroy(start));
-    CU_DRV_CHECK(api, api.cuEventDestroy(stop));
-    CU_DRV_CHECK(api, api.cuMemFree(d_Q));
-    CU_DRV_CHECK(api, api.cuMemFree(d_K));
-    CU_DRV_CHECK(api, api.cuMemFree(d_V));
-    CU_DRV_CHECK(api, api.cuMemFree(d_Out));
 
     return static_cast<double>(total_ms) / iters;
 }

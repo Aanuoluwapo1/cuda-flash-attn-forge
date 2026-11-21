@@ -137,8 +137,8 @@ OccupancyEstimate estimate_gemm_occupancy() {
     occ.shared_mem_bytes =
         (TILE_M * (TILE_K + 1) + TILE_K * (TILE_N + 1)) * sizeof(float);
 
-    // Reference SM architecture calculation (Ampere/Ada: 48 warps/SM or 64 warps/SM, 100KB+ SMEM)
-    constexpr int max_warps_per_sm = 48;
+    // Reference model: Turing SM 7.5 (GTX 16xx/RTX 20xx): 32 warps, 16 blocks, 64 KB shared mem per SM
+    constexpr int max_warps_per_sm = 32; // Turing SM 7.5: 1024 threads = 32 warps per SM
     constexpr int max_blocks_per_sm = 16;
     constexpr std::size_t max_smem_per_sm = 65536;
 
@@ -159,7 +159,7 @@ OccupancyEstimate estimate_attention_occupancy(int head_dim) {
     // s_K[TILE_N][MAX_HEAD_DIM + 1] + s_V[TILE_N][MAX_HEAD_DIM + 1]
     occ.shared_mem_bytes = 2 * TILE_N * (MAX_HEAD_DIM + 1) * sizeof(float);
 
-    constexpr int max_warps_per_sm = 48;
+    constexpr int max_warps_per_sm = 32; // Turing SM 7.5: 1024 threads = 32 warps per SM
     constexpr int max_blocks_per_sm = 16;
     constexpr std::size_t max_smem_per_sm = 65536;
 
@@ -250,7 +250,7 @@ BenchmarkResult run_warp_softmax_benchmark(int rows, int cols, int iters) {
     res.occupancy.threads_per_block = 4 * WARP_SIZE;
     res.occupancy.warps_per_block = 4;
     res.occupancy.shared_mem_bytes = 0;
-    res.occupancy.active_blocks_per_sm = 12;
+    res.occupancy.active_blocks_per_sm = 8; // 32 warps/SM / 4 warps per block
     res.occupancy.theoretical_occupancy_pct = 100.0;
 
     res.parity = compute_parity_metrics(ref_out.data(), act_out.data(), count, 1e-5, 0.999999);
