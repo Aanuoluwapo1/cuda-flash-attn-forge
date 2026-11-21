@@ -1,4 +1,5 @@
 build/
+build-*/
 cmake-build-*/
 *.obj
 *.o
@@ -9,6 +10,7 @@ cmake-build-*/
 *.exp
 *.pdb
 *.ilk
+*.ptx
 .vs/
 .vscode/
 .idea/

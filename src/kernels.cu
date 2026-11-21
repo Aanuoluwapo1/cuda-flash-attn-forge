@@ -1,3 +1,13 @@
+#if defined(ATTN_FORGE_CLANG_PTX_ONLY)
+#include "attn_forge/cuda_clang_device.cuh"
+namespace attn_forge {
+constexpr int TILE_M = 16;
+constexpr int TILE_N = 16;
+constexpr int TILE_K = 16;
+constexpr int WARP_SIZE = 32;
+constexpr int MAX_HEAD_DIM = 128;
+} // namespace attn_forge
+#else
 #include "attn_forge/kernels.cuh"
 
 #include <cmath>
@@ -7,10 +17,11 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
+#endif
 
 namespace attn_forge {
 
-namespace {
+extern "C" {
 
 // -----------------------------------------------------------------------------
 // 1. gemm_tiled_kernel
@@ -44,10 +55,10 @@ __global__ void gemm_tiled_kernel(
         const int b_row = t * TILE_K + ty;
 
         As[ty][tx] = (row < M && a_col < K)
-                         ? A[static_cast<std::size_t>(row) * K + a_col]
+                         ? A[static_cast<unsigned long long>(row) * K + a_col]
                          : 0.0f;
         Bs[ty][tx] = (b_row < K && col < N)
-                         ? B[static_cast<std::size_t>(b_row) * N + col]
+                         ? B[static_cast<unsigned long long>(b_row) * N + col]
                          : 0.0f;
 
         __syncthreads();
@@ -61,7 +72,7 @@ __global__ void gemm_tiled_kernel(
     }
 
     if (row < M && col < N) {
-        const std::size_t idx = static_cast<std::size_t>(row) * N + col;
+        const unsigned long long idx = static_cast<unsigned long long>(row) * N + col;
         const float prev = (beta != 0.0f) ? C[idx] : 0.0f;
         C[idx] = alpha * acc + beta * prev;
     }
@@ -72,7 +83,7 @@ __global__ void gemm_tiled_kernel(
 // Warp-level shuffle reductions (__shfl_xor_sync) for numerically stable
 // row-wise softmax normalization. One warp (32 threads) processes each row.
 // -----------------------------------------------------------------------------
-__inline__ __device__ float warp_reduce_max(float val) {
+__device__ inline float warp_reduce_max(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         val = fmaxf(val, __shfl_xor_sync(0xffffffffu, val, offset));
@@ -80,7 +91,7 @@ __inline__ __device__ float warp_reduce_max(float val) {
     return val;
 }
 
-__inline__ __device__ float warp_reduce_sum(float val) {
+__device__ inline float warp_reduce_sum(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         val += __shfl_xor_sync(0xffffffffu, val, offset);
@@ -99,8 +110,8 @@ __global__ void warp_rowmax_sum_kernel(
 
     if (warp_id >= rows) return;
 
-    const float* row_in = input + static_cast<std::size_t>(warp_id) * cols;
-    float* row_out = output + static_cast<std::size_t>(warp_id) * cols;
+    const float* row_in = input + static_cast<unsigned long long>(warp_id) * cols;
+    float* row_out = output + static_cast<unsigned long long>(warp_id) * cols;
 
     float local_max = -INFINITY;
     for (int c = lane_id; c < cols; c += WARP_SIZE) {
@@ -144,7 +155,7 @@ __global__ void causal_attention_tiled_kernel(
     const int q_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int tid = threadIdx.x;
 
-    const std::size_t head_offset = static_cast<std::size_t>(bh) * seq_len * head_dim;
+    const unsigned long long head_offset = static_cast<unsigned long long>(bh) * seq_len * head_dim;
     const float* q_bh = Q + head_offset;
     const float* k_bh = K + head_offset;
     const float* v_bh = V + head_offset;
@@ -233,7 +244,9 @@ __global__ void causal_attention_tiled_kernel(
     }
 }
 
-} // namespace
+} // extern "C"
+
+#if !defined(ATTN_FORGE_CLANG_PTX_ONLY)
 
 bool query_cuda_device_available() {
     int count = 0;
@@ -436,5 +449,7 @@ double launch_causal_attention_tiled_cuda(
 
     return static_cast<double>(total_ms) / iters;
 }
+
+#endif // !defined(ATTN_FORGE_CLANG_PTX_ONLY)
 
 } // namespace attn_forge

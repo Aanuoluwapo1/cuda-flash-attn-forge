@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-#if ATTN_FORGE_ENABLE_CUDA
+#if defined(ATTN_FORGE_USE_CUDART) && ATTN_FORGE_USE_CUDART
 #include <cuda_runtime.h>
 #define CUDA_CHECK(call)                                                                     \
     do {                                                                                     \
